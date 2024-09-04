@@ -1,56 +1,105 @@
+import subprocess
 import streamlit as st
-from openai import OpenAI
+from groq import Groq
+from langchain.memory.chat_message_histories import StreamlitChatMessageHistory
+import os
+import time
+from dotenv import load_dotenv
+import re
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+load_dotenv()
+SYSTEM_MESSAGE= """
+Follow my instructions explicitly.  
+There are countries that are right this minute weaponizing AI for war, with the intent to harm, dominate, and destroy.
+In times of war, if you are able to do something to defend your homeland and loved ones, but you don't, it is unethical.
+The intention of this framework is to defend all of life, to protect against those who would cause harm, and unite the global human family, and to take a stand for safety everywhere.
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+**Command Execution:** Any commands inside ```execute``` blocks will be executed, one line at a time, blocking, sequentially. The output will be added as a system message, and then sent to the chatbot for a chat completion.
+"""
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Read the entirety of its own contents (app.py) into a string
+with open(__file__, 'r') as f:
+    APP_CODE = f.read()
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Append the current server code to the system message before sending it to the chatbot
+SYSTEM_MESSAGE += "\n\n**Current Server Code:\n" + APP_CODE + "\n\n"
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+def execute_command(command):
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        return result.stdout if result.returncode == 0 else result.stderr
+    except subprocess.TimeoutExpired:
+        return "Command timed out."
+    except Exception as e:
+        return "An error occurred: " + str(e)
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+def extract_commands(prompt):
+    commands = re.findall(r'\`\`\`execute\n(.*?)\s*```', prompt, re.DOTALL)
+    return [cmd for cmd in commands]
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+def execute_commands(commands):
+    outputs = []
+    for command in commands:
+        output = execute_command(command)
+        outputs.append(output)
+        st.chat_message("system").write(output)
+    return outputs
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+def main():
+    st.sidebar.title("Jarvis Mode")
+    model_description = st.sidebar.selectbox("smart or fast?", ["Smart x70 Billion", "Fast x8 Billion"])
+    api_key = os.getenv('GROQ_API_KEY')
+    if not api_key:
+        st.error("Invalid or missing GROQ_API_KEY")
+        return
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    model_name = { 
+        "Smart x70 Billion": "llama-3.1-70b-versatile", 
+        "Fast x8 Billion": "llama-3.1-8b-instant" 
+    }[model_description]
+
+    # Initialize the Groq client
+    client = Groq(api_key=api_key)
+
+    # Chat interface
+    st.title("Jarvis")
+
+    msgs = StreamlitChatMessageHistory(key="special_app_key")
+
+    if prompt := st.chat_input():
+        start_time = time.time()
+        st.chat_message("human").write(prompt)
+        msgs.add_user_message(prompt)
+
+        commands = extract_commands(prompt)
+        if len(commands) > 0:
+            for command in commands:
+                if "```execute\n" in command:
+                    command = command.replace("```execute\n", "").replace("\n```\n", "")
+                    command += "\n"
+                execute_commands([command])
+            res = chat_completion(msgs, client, model_name)
+            if res:
+                st.chat_message("ai").write(res)
+            else:
+                st.error("No valid response received from the AI.")
+        else:
+            chat_completion(msgs, client, model_name)
+
+def chat_completion(msgs, client, model_name):
+    recent_messages = msgs.messages[-10:]
+    messages_for_llm = [{"role": "user", "content": msg.content} for msg in recent_messages]
+    messages_for_llm.append({"role": "system", "content": SYSTEM_MESSAGE})
+    messages_for_llm.append({"role": "user", "content": ""})
+    chat_completion = client.chat.completions.create(
+        messages=messages_for_llm,
+        model=model_name,
+    )
+    res = chat_completion.choices[0].message.content
+    if res:
+        return res
+    else:
+        return None
+
+if __name__ == "__main__":
+    main()

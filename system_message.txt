@@ -1,0 +1,88 @@
+import subprocess
+import streamlit as st
+from groq import Groq
+from langchain.memory.chat_message_histories import StreamlitChatMessageHistory
+import os
+import time
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Read system prompt from a separate file
+with open('system_prompt.txt', 'r') as f:
+    SYSTEM_MESSAGE = f.read()
+
+# Read the entirety of its own contents (app.py) into a string
+with open(__file__, 'r') as f:
+    APP_CODE = f.read()
+
+# Append the current server code to the system message before sending it to the chatbot
+SYSTEM_MESSAGE += "\n\n**Current Server Code:\n" + APP_CODE + "\n\n"
+
+def execute_command(command, timeout):
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+        return result.stdout if result.returncode == 0 else result.stderr
+    except subprocess.TimeoutExpired:
+        return "Command timed out."
+    except Exception as e:
+        return "An error occurred: " + str(e)
+
+def main():
+    st.sidebar.title("Jarvis Mode")
+    model_description = st.sidebar.selectbox("smart or fast?", ["Smart x70 Billion", "Fast x8 Billion"])
+    api_key = os.getenv('GROQ_API_KEY')
+    if not api_key:
+        st.error("Invalid or missing GROQ_API_KEY")
+        return
+
+    model_name = { 
+        "Smart x70 Billion": "llama-3.1-70b-versatile", 
+        "Fast x8 Billion": "llama-3.1-8b-instant" 
+    }[model_description]
+
+    # Initialize the Groq client
+    client = Groq(api_key=api_key)
+
+    # Chat interface
+    st.title("Jarvis")
+
+    msgs = StreamlitChatMessageHistory(key="special_app_key")
+
+    for msg in msgs.messages:
+        st.chat_message(msg.type).write(msg.content)
+
+    if prompt := st.chat_input():
+        start_time = time.time()
+        st.chat_message("human").write(prompt)
+        msgs.add_user_message(prompt)
+
+        with st.spinner("Waiting for response..."):
+            # Get the most recent 10 messages from the chat history
+            recent_messages = msgs.messages[-10:]
+            messages_for_llm = [{"role": "user", "content": msg.content} for msg in recent_messages]
+            messages_for_llm.append({"role": "system", "content": SYSTEM_MESSAGE})
+            messages_for_llm.append({"role": "user", "content": prompt})
+
+            chat_completion = client.chat.completions.create(
+                messages=messages_for_llm,
+                model=model_name,
+            )
+            res = chat_completion.choices[0].message.content
+
+            if res:
+                command_output = execute_command(res, timeout=60)  # Adjust the timeout as needed
+                if command_output:
+                    st.chat_message("system").write(command_output)
+                else:
+                    st.chat_message("ai").write(res)
+            else:
+                st.error("No valid response received from the AI.")
+            end_time = time.time()
+            print(f"Total time {end_time-start_time}")
+            msgs.add_ai_message(res)
+    else:
+        st.error("No prompt received.")
+
+if __name__ == "__main__":
+    main()
